@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root>
+	<!--数据库相关配置-->
+	<username>dybdcyjk</username>
+	<password>dybdcyjk</password>
+	<url>jdbc:oracle:thin:@localhost:1521:orcl</url>
+
+	<!--短信接口相关配置-->
+	<!-- 客户名称 -->
+	<ecName>东营市国土资源局</ecName>
+	<!-- 用户名-->
+	<apId>ceshi0</apId>
+	<!--密码 -->
+	<secretKey>ceshi0</secretKey>
+	<!--内容  -->
+	<content>这是一条测试短信!!发件人--中天吉奥徐州分公司 研发部</content>
+	<!-- 签名编码 -->
+	<sign>uJHXjyjdt</sign>
+	<!-- webService地址 -->
+	<webSUrl>http://112.35.1.155:1992/sms/norsubmit?</webSUrl>
+	
+	<!-- 程序故障紧急联系人邮箱配置 -->
+	<!--收件人邮箱地址...建议使用阿里云企业邮  -->
+	<receiveMailAccount>weihao@ztgeo.com.cn</receiveMailAccount>
+	<!-- 发件人昵称 -->
+	<sendMailPeople>系统管理员</sendMailPeople>
+	<!-- 通知人昵称 -->
+	<receiveMailPeople>被通知人</receiveMailPeople>
+	<!-- 邮件主题 -->
+	<emailTitle>东营短息通知程序反馈邮件</emailTitle>
+	
+	<!-- 重复执行时间 -->
+	<QuartzTime>0 */1 * * * ?</QuartzTime>
+</root>
+
