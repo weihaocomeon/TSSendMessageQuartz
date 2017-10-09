@@ -1,33 +1,27 @@
 package com.ztgeo.sendMessage;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
-import java.io.UnsupportedEncodingException;
-import java.net.URL;
-import java.net.URLConnection;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
+import java.io.File;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
-import org.apache.commons.codec.binary.Base64;
 import org.apache.log4j.Logger;
+import org.csapi.www.schema.sms.DeliveryInformation;
+import org.junit.Test;
 
-import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.JSONException;
 import com.ztgeo.dao.Dao;
-import com.ztgeo.entity.ReqMsg;
-import com.ztgeo.entity.RespMsg;
+import com.ztgeo.entity.SynDataUse;
 import com.ztgeo.entity.TelS;
 import com.ztgeo.main.Main;
 import com.ztgeo.staticParams.StaticParams;
+import com.ztgeo.utils.ErrorLog;
 import com.ztgeo.utils.FormateData;
+import com.ztgeo.utils.InfoLog;
+import com.ztgeo.utils.ReadXml;
+import com.ztgeo.utils.WebService;
 
-import net.sf.json.JSONObject;
 
 
 //发短息的类
@@ -38,48 +32,223 @@ public class SendMessage {
 		if (tels.size()==0) {
 			System.out.println("当前无最新消息....");
 		}
-		//组织参数reqstr
+		//追条插入信息
 		for (TelS tel : tels) {
 			System.out.println("当前短信信息的ID为:"+tel.getId());
-			String reqStr = getBase64Req(tel.getTel(),tel.getContent());
-			//将请求字符串进行执行post请求
-			System.out.println("64位编码后的数据:"+reqStr);
-			String resultStr = httpPost(reqStr);
-			//将结果集转换成返回对象
-			RespMsg respMsg = saveResultAsRespMsg(resultStr,tel);
-			//将返回对象保存到数据库
-			saveRespMsg(respMsg);
+			//将结果集转存到mysql
+			sendMessage(tel);
 			//释放资源
-			respMsg = null;
 			
-		}	
+		}
+		//查询库中未同步数据,进行获取反馈 
+		synData();
+		
 	}
 	
-	private void saveRespMsg(RespMsg respMsg) {
-		//连接数据库
-		Dao.getConnS(StaticParams.url, StaticParams.username , StaticParams.password);
-		//组织查询语句
-		Object[] params = new Object[4];
-		params[0] = respMsg.getMsgGroup();//msg反馈组信息
-		params[1] = (true ==respMsg.isOk()?"请求成功":"请求失败")+respMsg.getRspcod();//详细信息;//存入respstatue状态 代表请求的状态
-		params[2] = respMsg.getId();//id信息
-		params[3] = respMsg.getId();//id信息
-		String sql = "update sms_detailinfo t set (t.sendcount,t.msggroup,t.sendtime,t.reqinfo,t.remarks) =\n" + 
-					"(select t.sendcount+1,?,sysdate,?,'请求已发送' from sms_detailinfo t  where t.id = ?)\n" + 
-					"where t.id = ?";
-		//更新表
+	/*System.out.println(aas.length);
+	for (DeliveryInformation aa : aas) {
+		System.out.println((aa.getDeliveryStatus().getValue()));
+	}*/
+	
+	private void synData() {
 		try {
-			Dao.doExecuteUpdate(sql,params);
-			System.out.println("ID为:"+respMsg.getId()+"的短信信息请求状态已更新");
-			log.info("ID为:"+respMsg.getId()+"的短信信息请求状态已更新");
+			Thread.sleep(5000);
+		} catch (InterruptedException e) {
+			// TODO 自动生成的 catch 块
+			e.printStackTrace();
+		}
+		System.out.println("--同步反馈数据开始执行-----");
+			Dao.getConnO(StaticParams.url, StaticParams.username , StaticParams.password);
+		String findsyn = "select mysqlid,syncount from SMS_DETAILINFO where status=0 and remarks='请求成功'";
+			//将结果集进行保存成list
+			//将list进行解析后连接mysql库 并拿到相关结果 
+			ResultSet set =Dao.getData(findsyn);
+			findsyn=null;
+			List<SynDataUse> sets =resulttoList(set);
+			if(sets.size()>0&&sets.get(0)!=null){
+				//获取相应更新数据
+				getResult(sets);
+				System.out.println("----本次定时任务执行完毕-----");
+				//将集合遍历 去更新每条数据回执  
+			}else{
+				System.out.println("---未发现需要同步的数据!");
+				log.info("---未发现需要同步的数据!");
+			}
+			
+			sets=null;
+			
+		
+	}
+
+	private void updataStatus(String result, String mysqlid) {
+				String sql =  "update  sms_detailinfo t set(t.status,t.remarks,t.sendcount,t.sendtime,t.errormsg)=\n" +
+			            "(select 1,?,(t.sendcount+1), sysdate,? from sms_detailinfo t where t.mysqlid =?)\n" + 
+									" where t.mysqlid=?";
+				String[] params = new String[4];
+				params[0]= ("Delivered".equals(result)||"DeliveryToTerminal".equals(result))?"发送成功":"发送失败";
+				params[1]= FormateData.getresult(result);//错误提醒
+				params[2]= mysqlid;
+				params[3]= mysqlid;
+				Dao.getConnO(StaticParams.url, StaticParams.username , StaticParams.password);
+				try {
+					Dao.doExecuteUpdate(sql,params);
+					System.out.println("mysqlID为:"+mysqlid+"的短信回执状态已更新");
+					log.info("mysqlID为:"+mysqlid+"的短信回执状态已更新");
+					//数组的释放
+					
+				} catch (SQLException e) {
+					System.out.println("mysqlID为:"+mysqlid+"的短信回执状态更新失败");
+					log.error("mysqlID为:"+mysqlid+"的短信回执状态更新失败",e);
+					e.printStackTrace();
+				}finally {
+					//关闭资源
+					Dao.closeResource();
+					Dao.closeConn();
+					params=null;
+					sql=null;
+			}
+	}
+
+	private void getResult(List<SynDataUse> syndatause) {
+		//拼接字符串
+			for (int i = 0; i < syndatause.size(); i++) {
+				//判断次数  先  如果发现有 > 允许查找次数的 更新状态为失败
+				if(syndatause.get(i).getSyncount()>=StaticParams.synCount){
+					//更改发送状态为延时未接收到信息  
+					updataO(syndatause.get(i).getMysqlid());
+				}else{
+					//调用service服务查询同步数据  
+					//参数返回
+					DeliveryInformation[] results = WebService.getResult(syndatause.get(i).getMysqlid());
+					if(results.length>0){
+						//获取内容 并将结果进行保存
+						updataStatus(results[0].getDeliveryStatus().getValue(),syndatause.get(i).getMysqlid());
+					}else{
+						//拿到了空数据 进行更新循环查询次数  
+						updataCount(syndatause.get(i).getMysqlid());
+						
+					}
+					
+				}
+			}
+			
+			
+			
+			
+		
+	}
+
+	private void updataCount(String mysqlid) {
+		String sql = "update sms_detailinfo t set t.syncount =(t.syncount+1) where t.mysqlid='"+mysqlid+"'";
+		Dao.getConnO(StaticParams.url, StaticParams.username , StaticParams.password);
+		try {
+			Dao.doExecuteUpdate(sql,new String[0]);
+			System.out.println("MYSQLID为:"+mysqlid+"的短信信息请求状态(同步无有效信息同步次数加1)已更新");
+			log.info("MYSQLID为:"+mysqlid+"的短信信息请求状态(同步无有效信息同步次数加1)已更新");
 			//数组的释放
 			
 		} catch (SQLException e) {
-			System.out.println("执行更新操作时发生异常!!!");
-			System.out.println("ID为:"+respMsg.getId()+"的短信信息请求状态更新失败!!");
-			Main.sbError.append("执行更新操作时发生异常!!!ID为:"+respMsg.getId()+"的短信信息请求状态更新失败!!");
-			log.error("执行更新操作时发生异常!!!");
-			log.error("ID为:"+respMsg.getId()+"的短信信息请求状态更新失败!!");
+			System.out.println("MYSQLID为:"+mysqlid+"的短信信息请求状态更新(同步无有效信息同步)失败!!");
+			log.error("MYSQLID为:"+mysqlid+"的短信信息请求状态更新(同步无有效信息同步)失败!!");
+			e.printStackTrace();
+		}finally {
+			//关闭资源
+			Dao.closeResource();
+			Dao.closeConn();
+		}
+		
+	}
+
+	private void updataO(String mysqlid) {
+		String sql = "update sms_detailinfo t set t.remarks ='发送失败',t.errormsg='多次请求发送结果,发送信息超时', t.sendcount =(t.sendcount+1),t.status=1,t.sendtime=sysdate where t.mysqlid='"+mysqlid+"'";
+		Dao.getConnO(StaticParams.url, StaticParams.username , StaticParams.password);
+		try {
+			Dao.doExecuteUpdate(sql,new String[0]);
+			System.out.println("MYSQLID为:"+mysqlid+"的短信信息请求状态(多次无结果请求默认失败)已更新");
+			log.info("MYSQLID为:"+mysqlid+"的短信信息请求状态(多次无结果请求默认失败)已更新");
+			//数组的释放
+			
+		} catch (SQLException e) {
+			System.out.println("MYSQLID为:"+mysqlid+"的短信信息请求状态更新(多次无结果请求默认失败)失败!!");
+			log.error("MYSQLID为:"+mysqlid+"的短信信息请求状态更新(多次无结果请求默认失败)失败!!");
+			e.printStackTrace();
+		}finally {
+			//关闭资源
+			Dao.closeResource();
+			Dao.closeConn();
+		}
+	}
+
+	@Test
+	public void test(){
+
+		File directory = new File("xml");//设定为当前文件夹 
+		String path="";
+		
+		
+	    path = directory.getAbsolutePath();//获取标准的路径 
+	    //开发环境 该目录可用
+	    ReadXml.readXmlProperty(path);
+		new SendMessage().synData();
+	}
+	
+	private List<SynDataUse> resulttoList(ResultSet data) {
+		List<SynDataUse> list = new ArrayList<>();
+		try {
+			while(data.next()){
+				list.add(new SynDataUse(data.getString("mysqlid"),data.getInt("syncount")));
+			}
+		} catch (SQLException e) {
+			ErrorLog.log.error("--结果集中取sysdatause实体类出错---",e);
+			e.printStackTrace();
+		}finally {
+			Dao.closeConn();
+			Dao.closeResource();
+			data=null;
+		}
+		
+		return list;
+	}
+
+	private void sendMessage(TelS tel) {
+		//执行发送短信的方法
+		String resultMSG = WebService.sentSMS(tel);
+		if(resultMSG!=null){
+			System.out.println("---ID为:"+tel.getId()+"的数据请求webservice成功---");
+			InfoLog.log.info("---ID为:"+tel.getId()+"的数据请求webservice成功---");
+			updateMsg(tel,"请求成功",resultMSG);
+		}else{
+			System.out.println("---ID为:"+tel.getId()+"的数据请求webservice失败---");
+			ErrorLog.log.error("---ID为:"+tel.getId()+"的数据请求webservices失败---");
+			updateMsg(tel,"请求失败",resultMSG);
+		}
+		
+	}
+
+	private void updateMsg(TelS tel,String content, String id) {
+		//连接数据库
+		Dao.getConnO(StaticParams.url, StaticParams.username , StaticParams.password);
+		//组织查询语句
+		Object[] params = new Object[3];
+		String sql = "update sms_detailinfo t set t.remarks =\n" + 
+					"?,t.mysqlid=? \n" + 
+					"where t.id = ?";
+		params[0]=content;
+		params[1]=id;
+		params[2]=tel.getId();
+	
+		//更新表
+		try {
+			Dao.doExecuteUpdate(sql,params);
+			System.out.println("ID为:"+tel.getId()+"的短信信息请求状态已更新(发送请求状态)");
+			log.info("ID为:"+tel.getId()+"的短信信息请求状态已更新(发送请求状态)");
+			//数组的释放
+			
+		} catch (SQLException e) {
+			System.out.println("执行更新操作时发生异常!!!(发送请求状态)");
+			System.out.println("ID为:"+tel.getId()+"的短信信息请求状态更新失败!!(发送请求状态)");
+			log.error("执行更新操作时发生异常!!!(发送请求状态)");;
+			log.error("ID为:"+tel.getId()+"的短信信息请求状态更新失败!!(发送请求状态)");
 			e.printStackTrace();
 		}finally {
 			//关闭资源
@@ -89,192 +258,15 @@ public class SendMessage {
 		}
 	}
 
-	//分析结果 并保存结果
-	public RespMsg saveResultAsRespMsg(String resultStr, TelS tel) {
-		//解析json包
-		//创建json解析器
-		com.alibaba.fastjson.JSONObject jsonobj;
-		//将结果保存在类中
-		RespMsg resp = new RespMsg();
-		try {
-			
-			resp.setId(tel.getId());//id信息
-			jsonobj = com.alibaba.fastjson.JSONObject.parseObject(resultStr);
-			if(resultStr!=null&&!"".equals(resultStr)){
-				boolean  isOk = jsonobj.getBoolean("success");//是否成功
-				String rspcod = jsonobj.getString("rspcod");//返回状态
-				//未报异常 则保存msgGroup 状态值和信息
-				resp.setMsgGroup(jsonobj.getString("msgGroup"));
-				resp.setOk(isOk);
-				resp.setRspcod(rspcod);
-				System.out.println("状态值:"+isOk+"返回状态:"+rspcod);
-				log.info("状态值:"+isOk+"返回状态:"+rspcod);
-			}else{
-				Main.sbError.append("返回结果不是json格式,保存失败!ID:"+tel.getId());
-				System.out.println("返回结果不是json格式,保存失败!");
-				log.error("返回结果不是json格式,保存失败!ID:"+tel.getId());
-				//状态为false 信息为syso信息
-				resp.setOk(false);
-				resp.setRspcod("返回结果不是json格式,保存失败!");
-			}
-		} catch (JSONException e) {
-			log.error("将结果转为json时失败!ID:"+tel.getId());
-			Main.sbError.append("将结果转为json时失败!ID:"+tel.getId());
-			System.out.println("将结果转为json时失败!");
-			//状态为false 信息为syso信息
-			resp.setOk(false);
-			resp.setRspcod("将结果转为json时失败!");
-			e.printStackTrace();
-		} catch (NullPointerException e){
-			log.error("接口返回的json数据信息异常!ID:"+tel.getId());
-			Main.sbError.append("接口返回的json数据信息异常!ID:"+tel.getId());
-			//空指针说明返回时json数据 但不是我们需要的数据
-			System.out.println("接口返回的json数据信息异常!");
-			//状态为false 信息为syso信息
-			resp.setOk(false);
-			resp.setRspcod("接口返回的json数据信息异常!");
-		}
-		
-		return resp;
-	}
 	
-	public String getBase64Req(String telNum, String content) {
-		//拼装请求参数
-		ReqMsg ms = new ReqMsg();
-		ms.setEcName(StaticParams.ecName);//集团名称
-		ms.setApId(StaticParams.apID);//用户名
-		ms.setSecretKey(StaticParams.secretKey);//密码
-		ms.setMobiles(telNum);//电话号码
-		ms.setContent(content);//内容
-		ms.setSign(StaticParams.sign);//网关签名编码
-		ms.setAddSerial("");
-		
-		StringBuffer sb = new StringBuffer();
-		sb.append(ms.getEcName());
-		sb.append(ms.getApId());
-		sb.append(ms.getSecretKey());
-		sb.append(ms.getMobiles());
-		sb.append(ms.getContent());
-		sb.append(ms.getSign());
-		sb.append(ms.getAddSerial());
-		System.out.println("加密前:"+sb.toString());
-		ms.setMac(encryptToMD5(sb.toString()));
-		  //将类实例化
-	      String reqTest = JSON.toJSONString(ms);//JSONObject.fromObject(ms).toString();
-	      System.out.println("当前的请求数据:"+reqTest);
-	      //释放资源
-	      ms= null;
-	      sb=null;
-	      //base64位加密
-	      String reqStr=null;
-		try {
-			reqStr = Base64.encodeBase64String(reqTest.getBytes("utf-8"));
-		} catch (UnsupportedEncodingException e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		}
-	      
-	     
-	     //解析返回 的字符串 如果成功 或者失败则导入
-		return reqStr;
-	}
 	
-	public static String encryptToMD5(String password) {
-		byte[] digesta = null;
-		String result = null;
-		try {
-
-			// 得到一个MD5的消息摘要
-			MessageDigest mdi = MessageDigest.getInstance("MD5");
-			// 添加要进行计算摘要的信息
-			mdi.update(password.getBytes("utf-8"));
-			// 得到该摘要
-			digesta = mdi.digest();
-			result = byteToHex(digesta);
-			System.out.println("md5加密后的数据:"+result);
-		} catch (NoSuchAlgorithmException e) {
-
-		} catch (UnsupportedEncodingException e) {
-			// TODO 自动生成�?catch �?
-			e.printStackTrace();
-		}
-		return result;
-	}
-
-	/**
-	 * 将二进制转化为16进制字符串
-	 */
-	public static String byteToHex(byte[] pwd) {
-		StringBuilder hs = new StringBuilder("");
-		String temp = "";
-		for (int i = 0; i < pwd.length; i++) {
-			temp = Integer.toHexString(pwd[i] & 0XFF);
-			if (temp.length() == 1) {
-				hs.append("0").append(temp);
-			} else {
-				hs.append(temp);
-			}
-		}
-		return hs.toString().toLowerCase();
-	}
-	
-	public String httpPost(String reqStr){
-		OutputStreamWriter out = null;
-		
-		BufferedReader in = null;
-		String result = "";
-		try {
-			URL realUrl = new URL(StaticParams.webSUrl);
-			URLConnection conn = realUrl.openConnection();
-			conn.setRequestProperty("accept", "*/*");
-			conn.setRequestProperty("contentType","utf-8");
-			conn.setRequestProperty("connection", "Keep-Alive");
-			conn.setRequestProperty("user-agent",
-					"Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1; SV1)");
-			conn.setDoOutput(true);
-			conn.setDoInput(true);
-			out = new OutputStreamWriter(conn.getOutputStream());
-			out.write(reqStr);
-			out.flush();
-			
-			in = new BufferedReader(
-					new InputStreamReader(conn.getInputStream()));
-			String line;
-			while ((line = in.readLine()) != null) {
-				result += "\n" + line;
-				System.out.println("接口返回结果:"+result);
-			}
-		} catch (Exception e) {
-			Main.sbError.append("---发送接口请求时异常!!");
-			System.out.println("---发送接口请求时异常!!");
-			System.out.println(e.getLocalizedMessage());
-			log.error("---发送接口请求时异常!!");
-			log.error(e.getLocalizedMessage());
-			e.printStackTrace();
-			
-		} finally {
-			try {
-				if (out != null) {
-					out.close();
-				}
-				if (in != null) {
-					in.close();
-				}
-			} catch (IOException ex) {
-				Main.sbError.append("--关闭post输入流时发生异常!!");
-				ex.printStackTrace();
-			}
-		}
-		return result;
-		
-	}
 	
 	//获得需要发送信息的list集合
 	public List<TelS> getSendData() {
 		//连接数据库
-		Dao.getConnS(StaticParams.url, StaticParams.username , StaticParams.password);
+		Dao.getConnO(StaticParams.url, StaticParams.username , StaticParams.password);
 		//组织查询语句
-		String sql = "select T.PHONENUMBER,T.CONTENT,T.ID from sms_detailinfo T where remarks is null";
+		String sql = "select T.PHONENUMBER,T.CONTENT,T.ID from sms_detailinfo T where remarks  ='服务开始准备发送短信'";
 		//进行查询后取值
 		ResultSet set = Dao.getData(sql);
 		//放入list
@@ -294,8 +286,7 @@ public class SendMessage {
 			}
 		} catch (SQLException e) {
 			Main.sbError.append("处理获取未发短信时的set集合时发生问题!!!");
-			log.error("处理set集合时发生问题!!!");
-			log.error(e.getLocalizedMessage());
+			log.error("处理set集合时发生问题!!!",e);
 			System.out.println("处理set集合时发生问题!!!");
 			e.printStackTrace();
 		}
